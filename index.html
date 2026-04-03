@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BytePad • Tiny Notepad</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --bg: #f8f9fa;
+            --text: #212529;
+            --accent: #0d6efd;
+        }
+        [data-theme="dark"] {
+            --bg: #1e1e1e;
+            --text: #e0e0e0;
+            --accent: #4da6ff;
+        }
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #sidebar {
+            width: 260px;
+            border-right: 1px solid #ddd;
+            background: var(--bg);
+            display: flex;
+            flex-direction: column;
+        }
+        #main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        header {
+            padding: 10px 15px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg);
+        }
+        button {
+            padding: 6px 12px;
+            margin: 2px;
+            border: none;
+            border-radius: 4px;
+            background: var(--accent);
+            color: white;
+            cursor: pointer;
+        }
+        button:hover { opacity: 0.9; }
+        input, textarea {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 8px;
+        }
+        #note-list {
+            flex: 1;
+            overflow-y: auto;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        #note-list li {
+            padding: 10px 15px;
+            border-bottom: 1px solid #ddd;
+            cursor: pointer;
+        }
+        #note-list li:hover, #note-list li.active {
+            background: rgba(13, 110, 253, 0.1);
+        }
+        .split {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+        .pane {
+            flex: 1;
+            padding: 15px;
+            overflow: auto;
+            border-right: 1px solid #ddd;
+        }
+        #editor {
+            width: 100%;
+            height: 100%;
+            resize: none;
+            font-family: monospace;
+            font-size: 15px;
+            line-height: 1.5;
+            background: var(--bg);
+            color: var(--text);
+        }
+        #preview {
+            background: white;
+            padding: 15px;
+            border-radius: 4px;
+            min-height: 100%;
+        }
+        [data-theme="dark"] #preview {
+            background: #2d2d2d;
+        }
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+            margin-top: 1.2em;
+        }
+        .note-title {
+            font-weight: bold;
+        }
+        #search {
+            width: 100%;
+            margin: 10px 15px;
+            padding: 8px;
+        }
+    </style>
+</head>
+<body data-theme="light">
+    <!-- Sidebar -->
+    <div id="sidebar">
+        <header>
+            <strong>BytePad</strong>
+            <div>
+                <button onclick="newNote()">New</button>
+                <button onclick="toggleTheme()">🌗</button>
+            </div>
+        </header>
+        <input type="text" id="search" placeholder="Search notes..." onkeyup="filterNotes()">
+        <ul id="note-list"></ul>
+    </div>
+
+    <!-- Main Area -->
+    <div id="main">
+        <header>
+            <input type="text" id="note-title" placeholder="Note title" style="flex:1; margin-right:10px;" onblur="saveCurrentNote()">
+            <button onclick="deleteCurrentNote()">Delete</button>
+            <button onclick="exportNote()">Export MD</button>
+        </header>
+        
+        <div class="split">
+            <!-- Editor -->
+            <div class="pane">
+                <textarea id="editor" placeholder="Start typing Markdown here..."></textarea>
+            </div>
+            
+            <!-- Live Preview -->
+            <div class="pane" style="border-right: none;">
+                <div id="preview" class="markdown-body"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tiny IndexedDB wrapper (very small & efficient)
+        let db;
+        const DB_NAME = "BytePadDB";
+        const STORE_NAME = "notes";
+        
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = (e) => {
+                    db = e.target.result;
+                    if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        db.createObjectStore(STORE_NAME, { keyPath: "id" });
+                    }
+                };
+                request.onsuccess = (e) => {
+                    db = e.target.result;
+                    resolve();
+                };
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        // Note data
+        let notes = [];
+        let currentNoteId = null;
+
+        // Load notes
+        async function loadNotes() {
+            await openDB();
+            const tx = db.transaction(STORE_NAME, "readonly");
+            const store = tx.objectStore(STORE_NAME);
+            const request = store.getAll();
+            
+            request.onsuccess = () => {
+                notes = request.result || [];
+                if (notes.length === 0) {
+                    newNote(true); // create welcome note
+                } else {
+                    renderNoteList();
+                    loadNote(notes[0].id);
+                }
+            };
+        }
+
+        function renderNoteList(filteredNotes = null) {
+            const list = document.getElementById("note-list");
+            list.innerHTML = "";
+            const toRender = filteredNotes || notes;
+            
+            toRender.sort((a, b) => b.updated - a.updated);
+            
+            toRender.forEach(note => {
+                const li = document.createElement("li");
+                li.innerHTML = `<span class="note-title">${note.title || "Untitled"}</span><br>
+                                <small>${new Date(note.updated).toLocaleDateString()}</small>`;
+                li.onclick = () => loadNote(note.id);
+                if (note.id === currentNoteId) li.classList.add("active");
+                list.appendChild(li);
+            });
+        }
+
+        function filterNotes() {
+            const term = document.getElementById("search").value.toLowerCase();
+            if (!term) {
+                renderNoteList();
+                return;
+            }
+            const filtered = notes.filter(n => 
+                (n.title || "").toLowerCase().includes(term) || 
+                n.content.toLowerCase().includes(term)
+            );
+            renderNoteList(filtered);
+        }
+
+        // Create new note
+        function newNote(silent = false) {
+            const newNote = {
+                id: Date.now().toString(36),
+                title: "Untitled Note",
+                content: "# Welcome to BytePad\n\nA tiny, fast, offline notepad.\n\n**Features:**\n- Live Markdown preview\n- Multiple notes\n- Search\n- Dark mode\n- Works completely offline",
+                updated: Date.now()
+            };
+            notes.unshift(newNote);
+            saveToDB(newNote);
+            renderNoteList();
+            loadNote(newNote.id);
+            if (!silent) alert("New note created!");
+        }
+
+        // Load a note
+        function loadNote(id) {
+            currentNoteId = id;
+            const note = notes.find(n => n.id === id);
+            if (!note) return;
+            
+            document.getElementById("note-title").value = note.title || "";
+            document.getElementById("editor").value = note.content || "";
+            updatePreview();
+            renderNoteList();
+        }
+
+        // Save current note
+        function saveCurrentNote() {
+            if (!currentNoteId) return;
+            const note = notes.find(n => n.id === currentNoteId);
+            if (!note) return;
+            
+            note.title = document.getElementById("note-title").value.trim() || "Untitled Note";
+            note.content = document.getElementById("editor").value;
+            note.updated = Date.now();
+            
+            saveToDB(note);
+            renderNoteList();
+        }
+
+        function saveToDB(note) {
+            const tx = db.transaction(STORE_NAME, "readwrite");
+            const store = tx.objectStore(STORE_NAME);
+            store.put(note);
+        }
+
+        // Delete current note
+        function deleteCurrentNote() {
+            if (!currentNoteId || !confirm("Delete this note?")) return;
+            notes = notes.filter(n => n.id !== currentNoteId);
+            
+            const tx = db.transaction(STORE_NAME, "readwrite");
+            const store = tx.objectStore(STORE_NAME);
+            store.delete(currentNoteId);
+            
+            currentNoteId = null;
+            renderNoteList();
+            
+            if (notes.length > 0) {
+                loadNote(notes[0].id);
+            } else {
+                document.getElementById("editor").value = "";
+                document.getElementById("preview").innerHTML = "";
+            }
+        }
+
+        // Live preview
+        function updatePreview() {
+            const content = document.getElementById("editor").value;
+            const html = marked.parse(content, { breaks: true });
+            document.getElementById("preview").innerHTML = html;
+        }
+
+        // Export current note as Markdown
+        function exportNote() {
+            if (!currentNoteId) return;
+            const note = notes.find(n => n.id === currentNoteId);
+            if (!note) return;
+            
+            const blob = new Blob([note.content], { type: "text/markdown" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = (note.title || "note") + ".md";
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Toggle dark/light theme
+        function toggleTheme() {
+            const body = document.body;
+            if (body.getAttribute("data-theme") === "dark") {
+                body.setAttribute("data-theme", "light");
+            } else {
+                body.setAttribute("data-theme", "dark");
+            }
+        }
+
+        // Autosave on input (debounced)
+        let saveTimeout;
+        function setupAutosave() {
+            const editor = document.getElementById("editor");
+            editor.addEventListener("input", () => {
+                updatePreview();
+                clearTimeout(saveTimeout);
+                saveTimeout = setTimeout(saveCurrentNote, 800);
+            });
+            
+            const titleInput = document.getElementById("note-title");
+            titleInput.addEventListener("input", () => {
+                clearTimeout(saveTimeout);
+                saveTimeout = setTimeout(saveCurrentNote, 800);
+            });
+        }
+
+        // Basic PWA install prompt (optional)
+        let deferredPrompt;
+        window.addEventListener("beforeinstallprompt", (e) => {
+            deferredPrompt = e;
+        });
+
+        // Init everything
+        async function init() {
+            await loadNotes();
+            setupAutosave();
+            
+            // Keyboard shortcuts
+            document.addEventListener("keydown", (e) => {
+                if (e.ctrlKey && e.key === "s") {
+                    e.preventDefault();
+                    saveCurrentNote();
+                }
+                if (e.ctrlKey && e.key === "n") {
+                    e.preventDefault();
+                    newNote();
+                }
+            });
+            
+            // Initial preview
+            setTimeout(() => {
+                updatePreview();
+            }, 100);
+            
+            console.log("%cBytePad ready — every byte precious!", "color: #0d6efd; font-weight: bold");
+        }
+
+        // Start the app
+        init();
+    </script>
+</body>
+</html>
